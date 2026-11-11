@@ -1,0 +1,38 @@
+Detect Unusual File Creation Volume
+This rule identifies users whose file creation activity in the last hour is significantly higher than their average daily activity over the previous 14 days.
+let HistoricalPeriod = 14d;
+let DetectionWindow = 1h;
+
+// Historical baseline
+let Baseline =
+DeviceFileEvents
+| where Timestamp between (ago(HistoricalPeriod) .. ago(DetectionWindow))
+| where ActionType in ("FileCreated", "FileModified")
+| summarize AvgFilesPerHour = count() / (HistoricalPeriod / 1h)
+    by InitiatingProcessAccountName, DeviceName;
+
+// Recent activity
+let RecentActivity =
+DeviceFileEvents
+| where Timestamp > ago(DetectionWindow)
+| where ActionType in ("FileCreated", "FileModified")
+| summarize RecentFileCount = count(),
+            DistinctFolders = dcount(FolderPath),
+            DistinctFiles = dcount(FileName)
+    by InitiatingProcessAccountName, DeviceName;
+
+// Detect anomalies
+RecentActivity
+| join kind=inner Baseline on InitiatingProcessAccountName, DeviceName
+| extend ActivityRatio = todouble(RecentFileCount) / iff(AvgFilesPerHour == 0, 1, AvgFilesPerHour)
+| where RecentFileCount > 100
+| where ActivityRatio > 5
+| project Timestamp = now(),
+          InitiatingProcessAccountName,
+          DeviceName,
+          RecentFileCount,
+          AvgFilesPerHour,
+          ActivityRatio,
+          DistinctFolders,
+          DistinctFiles
+| order by ActivityRatio desc
