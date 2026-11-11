@@ -1,0 +1,72 @@
+Detect Possible Mass File Modification / Ransomware Activity
+DeviceFileEvents
+| where Timestamp > ago(30m)
+| where ActionType in ("FileModified", "FileRenamed")
+| summarize
+    ModifiedFiles = dcount(SHA1),
+    FileOperations = count(),
+    DistinctFolders = dcount(FolderPath)
+    by DeviceName,
+       InitiatingProcessAccountName,
+       InitiatingProcessFileName
+| where ModifiedFiles > 200
+      and DistinctFolders > 10
+| order by ModifiedFiles desc
+
+Detect Access to Unusual Number of Sensitive File Types
+DeviceFileEvents
+| where Timestamp > ago(1h)
+| where FileName matches regex @".*\.(docx|xlsx|xls|pdf|csv|pptx)$"
+| summarize
+    FileCount = dcount(FileName),
+    FolderCount = dcount(FolderPath)
+    by DeviceName,
+       InitiatingProcessAccountName,
+       InitiatingProcessFileName
+| where FileCount > 500
+| order by FileCount desc
+
+Advanced Behavioural Anomaly Using Standard Deviation
+This approach calculates a baseline and flags activity exceeding 3 standard deviations.
+let Baseline =
+DeviceFileEvents
+| where Timestamp between (ago(30d) .. ago(1d))
+| summarize HourlyCount=count()
+    by InitiatingProcessAccountName,
+       DeviceName,
+       bin(Timestamp, 1h)
+| summarize
+    AvgCount = avg(HourlyCount),
+    StdDevCount = stdev(HourlyCount)
+    by InitiatingProcessAccountName,
+       DeviceName;
+
+let Current =
+DeviceFileEvents
+| where Timestamp > ago(1h)
+| summarize CurrentCount=count()
+    by InitiatingProcessAccountName,
+       DeviceName;
+
+Current
+| join kind=inner Baseline on InitiatingProcessAccountName, DeviceName
+| where CurrentCount > AvgCount + (3 * StdDevCount)
+| project
+    InitiatingProcessAccountName,
+    DeviceName,
+    CurrentCount,
+    AvgCount,
+    StdDevCount,
+    Threshold = AvgCount + (3 * StdDevCount)
+
+Recommended Analytics Rule Settings
+Frequency: Every 15 minutes
+Lookup period: 1 hour
+Severity: Medium to High
+Entity mappings:
+Account → InitiatingProcessAccountName
+Host → DeviceName
+File → FileName
+Suppression: 1-2 hours to reduce alert storms
+
+For enterprise environments, I'd recommend the standard deviation model (last query) because it adapts to each user's normal behaviour and reduces false positives compared with static thresholds.
