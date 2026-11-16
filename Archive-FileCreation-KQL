@@ -67,3 +67,16 @@ ArchiveToolExecution
     DistinctFolders,
     ArchiveCommands
 | order by RiskScore desc
+
+Elevate the detection from archive creation to archive creation followed by potential exfiltration, which is a much stronger signal for insider threat and data theft.
+let CloudUploads =
+CloudAppEvents
+| where Timestamp > ago(1h)
+| where ActionType in ("FileUploaded","Upload")
+| summarize
+    UploadedFiles=count()
+    by AccountObjectId;
+
+...
+| join kind=leftouter CloudUploads on $left.AccountName == $right.AccountObjectId
+| extend RiskScore = RiskScore + iff(UploadedFiles > 0, 30, 0)
