@@ -1,0 +1,95 @@
+let TimeWindow = 1h;
+let LargeArchiveMB = 500;
+let MassFileThreshold = 500;
+
+// Archive tool execution
+let ArchiveToolExecution =
+DeviceProcessEvents
+| where Timestamp > ago(TimeWindow)
+| where FileName in~ (
+    "winrar.exe","rar.exe",
+    "7z.exe","7za.exe","7zg.exe",
+    "winzip.exe"
+)
+| extend PasswordProtected =
+    iff(ProcessCommandLine has_any ("-p","-hp","/p"), 1, 0)
+| summarize
+    ArchiveToolSeen = 1,
+    PasswordProtectedArchive = max(PasswordProtected),
+    ArchiveCommands = make_set(ProcessCommandLine, 20),
+    ArchiveExecTime = max(Timestamp)
+    by
+        DeviceId,
+        DeviceName,
+        InitiatingProcessAccountName;
+
+// Archive file creation
+let LargeArchives =
+DeviceFileEvents
+| where Timestamp > ago(TimeWindow)
+| where ActionType == "FileCreated"
+| where FileName matches regex @".*\.(zip|rar|7z)$"
+| extend ArchiveSizeMB = todouble(FileSize) / 1024 / 1024
+| summarize
+    ArchiveCount = count(),
+    LargestArchiveMB = max(ArchiveSizeMB),
+    TotalArchiveMB = sum(ArchiveSizeMB),
+    ArchiveCreateTime = max(Timestamp)
+    by
+        DeviceId,
+        DeviceName,
+        InitiatingProcessAccountName
+| where LargestArchiveMB >= LargeArchiveMB;
+
+// Mass file activity
+let MassFileActivity =
+DeviceFileEvents
+| where Timestamp > ago(TimeWindow)
+| where ActionType in ("FileCreated","FileModified","FileRenamed")
+| summarize
+    ModifiedFiles = count(),
+    DistinctFolders = dcount(FolderPath),
+    LastMassActivity = max(Timestamp)
+    by
+        DeviceId,
+        DeviceName,
+        InitiatingProcessAccountName
+| where ModifiedFiles >= MassFileThreshold;
+
+// Correlate
+ArchiveToolExecution
+| join kind=leftouter (
+    LargeArchives
+    | project
+        DeviceId,
+        InitiatingProcessAccountName,
+        ArchiveCount,
+        LargestArchiveMB,
+        TotalArchiveMB
+) on DeviceId, InitiatingProcessAccountName
+| join kind=leftouter (
+    MassFileActivity
+    | project
+        DeviceId,
+        InitiatingProcessAccountName,
+        ModifiedFiles,
+        DistinctFolders
+) on DeviceId, InitiatingProcessAccountName
+| extend RiskScore =
+    20 * toint(ArchiveToolSeen)
+    + 30 * iff(PasswordProtectedArchive > 0, 1, 0)
+    + 30 * iff(isnotnull(LargestArchiveMB), 1, 0)
+    + 20 * iff(isnotnull(ModifiedFiles), 1, 0)
+| where RiskScore >= 50
+| project
+    DeviceName,
+    User = InitiatingProcessAccountName,
+    RiskScore,
+    PasswordProtectedArchive,
+    ArchiveCount,
+    LargestArchiveMB,
+    TotalArchiveMB,
+    ModifiedFiles,
+    DistinctFolders,
+    ArchiveCommands
+| order by RiskScore desc
