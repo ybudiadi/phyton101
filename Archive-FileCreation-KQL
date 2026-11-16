@@ -1,0 +1,69 @@
+let TimeWindow = 1h;
+let LargeArchiveMB = 500;
+let MassFileThreshold = 500;
+
+// Archive tool execution
+let ArchiveToolExecution =
+DeviceProcessEvents
+| where Timestamp > ago(TimeWindow)
+| where FileName in~ (
+    "winrar.exe","rar.exe",
+    "7z.exe","7za.exe","7zg.exe",
+    "winzip.exe"
+)
+| extend PasswordProtected =
+    iff(ProcessCommandLine has_any ("-p","-hp","/p","password"), 1, 0)
+| summarize
+    ArchiveToolSeen = 1,
+    PasswordProtectedArchive = max(PasswordProtected),
+    ArchiveCommands = make_set(ProcessCommandLine,20)
+    by DeviceId, DeviceName, AccountName;
+
+// Large archive creation
+let LargeArchives =
+DeviceFileEvents
+| where Timestamp > ago(TimeWindow)
+| where ActionType == "FileCreated"
+| where FileName matches regex @".*\.(zip|rar|7z)$"
+| summarize
+    ArchiveCount = count(),
+    LargestArchiveMB = max(todouble(FileSize)/(1024*1024)),
+    TotalArchiveMB = sum(todouble(FileSize)/(1024*1024))
+    by DeviceId, DeviceName, InitiatingProcessAccountName
+| where LargestArchiveMB >= LargeArchiveMB;
+
+// Rapid encryption/staging activity
+let MassFileActivity =
+DeviceFileEvents
+| where Timestamp > ago(TimeWindow)
+| where ActionType in ("FileCreated","FileModified","FileRenamed")
+| summarize
+    ModifiedFiles = count(),
+    DistinctFolders = dcount(FolderPath)
+    by DeviceId, DeviceName, InitiatingProcessAccountName
+| where ModifiedFiles >= MassFileThreshold;
+
+// Correlation
+ArchiveToolExecution
+| join kind=leftouter LargeArchives on DeviceId
+| join kind=leftouter MassFileActivity on DeviceId
+| extend RiskScore = 0
+| extend RiskScore =
+        RiskScore +
+        iff(ArchiveToolSeen == 1, 20, 0) +
+        iff(PasswordProtectedArchive == 1, 30, 0) +
+        iff(isnotnull(LargestArchiveMB), 30, 0) +
+        iff(isnotnull(ModifiedFiles), 20, 0)
+| where RiskScore >= 50
+| project
+    Timestamp = now(),
+    DeviceName,
+    AccountName,
+    RiskScore,
+    PasswordProtectedArchive,
+    LargestArchiveMB,
+    TotalArchiveMB,
+    ModifiedFiles,
+    DistinctFolders,
+    ArchiveCommands
+| order by RiskScore desc
