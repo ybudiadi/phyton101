@@ -93,3 +93,34 @@ ArchiveToolExecution
     DistinctFolders,
     ArchiveCommands
 | order by RiskScore desc
+
+This .cip archiving requires all three conditions:
+Archive tool executed
+.cip file referenced or accessed
+New file created by the same archive process within 5 minutes
+---------------------
+let TimeWindow = 15m;
+let ArchiveExecution =
+DeviceProcessEvents
+| where Timestamp > ago(TimeWindow)
+| where FileName in~ ("winrar.exe","rar.exe","7z.exe","7za.exe","winzip.exe","tar.exe")
+| where ProcessCommandLine contains ".cip"
+| project DeviceId, DeviceName, Timestamp, FileName, ProcessCommandLine, InitiatingProcessAccountName;
+
+let ArchiveCreation =
+DeviceFileEvents
+| where Timestamp > ago(TimeWindow)
+| where ActionType == "FileCreated"
+| where FileName !endswith ".cip"
+| project DeviceId, CreatedTime=Timestamp, CreatedFile=FileName, FolderPath;
+
+ArchiveExecution
+| join kind=inner ArchiveCreation on DeviceId
+| where CreatedTime between (Timestamp .. Timestamp + 5m)
+| project
+    DeviceName,
+    User=InitiatingProcessAccountName,
+    ArchiveTool=FileName,
+    ProcessCommandLine,
+    CreatedFile,
+    FolderPath
